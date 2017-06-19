@@ -1,0 +1,350 @@
+<dom-module id="build-projects-builds-overview">
+    <template>
+        <style include="grid-styles">
+            h3 {
+                margin-top: 35px;
+                display: inline-block;
+            }
+
+            build-project-notifications {
+                margin-top: 14px;
+                display: inline-block;
+                width: 100%;
+            }
+
+            comp-select {
+                margin-top: 25px;
+                position: relative;
+                display: inline-block;
+                width: 200px;
+                float: right;
+            }
+
+            comp-card {
+                --comp-card-header-border-bottom: none;
+                margin-bottom: 10px;
+                --comp-card-header: {
+                    padding-bottom: 0;
+                }
+                ;
+                --comp-card-heading: {
+                    color: var(--c-dark);
+                    @apply(--font-b-sm);
+                }
+                ;
+            }
+
+            #dependentProjectsDialog .results {
+                padding-right: 40px;
+            }
+        </style>
+        <app-route route="{{route}}" pattern="/:project" data="{{routeData}}" tail="{{subroute}}"></app-route>
+        <div class="grid-row">
+            <div class="grid-col-xl-2 hidden-sm-down"></div>
+            <div class="grid-col-lg-12 grid-col-xl-8">
+                <h3 header>
+                    <paper-icon-button icon="arrow-back" on-tap="_onBack"></paper-icon-button>Project {{projectId}}
+                </h3>
+                <iron-ajax id="configDataReq" auto url="/src/config/horizon-config.json" handle-as="json" with-credentials="true" on-error="handleErrorResponse"
+                    on-response="handleConfigResponse">
+                </iron-ajax>
+                <iron-ajax id="branchDataReq" url="//{{host}}/projects/{{projectId}}/branches" handle-as="json" with-credentials="true" on-error="handleBranchError"
+                    on-response="handleBranchResponse">
+                </iron-ajax>
+                <comp-select label="Select a branch" id="project_branch_selector" required value="{{ branch }}" constrain-width>
+                    <template is="dom-repeat" as="branch_info" items="[[projectBranches]]">
+                        <comp-item class="size-sm" value="[[branch_info.name]]">[[branch_info.name]]</comp-item>
+                    </template>
+                </comp-select>
+                <comp-card elevation="1">
+                    <h4 slot="header">Information</h4>
+                    <build-project-form-details project="[[project]]"></build-project-form-details>
+                </comp-card>
+                <build-project-notifications project-id="[[projectId]]"></build-project-notifications>
+                <build-progress on-task-click="onProgressTap" hidden$="[[hideStages]]" id="progress" build_name="[[build_name]]" build_status="[[build_status]]"
+                    stages="[[stages]]"></build-progress>
+                <build-nolio-progress deployments="[[deployments]]" hidden$="[[hideNolio]]"></build-nolio-progress>
+                <comp-card elevation="2">
+                    <h3 header>History</h3>
+                    <div hidden$="[[foundBuilds]]">No builds can be found.</div>
+                    <build-build-history hidden$="[[!foundBuilds]]" id="latest-builds" latest-builds="[[latest_builds]]" details-path="details/"></build-build-history>
+                </comp-card>
+                <comp-card elevation="3">
+                    <h4 slot="header">Dependencies</h4>
+                    <paper-button raised="" role="button" on-tap="_showDependents" disabled$="[[!dependentProjects.length]]">
+                        Used by ([[dependentProjects.length]])
+                    </paper-button>
+                </comp-card>
+                <paper-dialog with-backdrop id="dependentProjectsDialog">
+                    <paper-dialog-scrollable class="results">
+                        <template is="dom-repeat" items="{{dependentProjectsGroups}}">
+                            <span>{{item.0.projectVersion}}</span>
+                            <ul>
+                                <template is="dom-repeat" items="{{item}}">
+                                    <li><a on-tap="_hideDependents" href$="[[_computeProjectUrl(item)]]">[[item.project_id]]@[[item.version]]</a></li>
+                                </template>
+                            </ul>
+                        </template>
+                        <div class="buttons">
+                            <paper-button dialog-confirm autofocus>Close</paper-button>
+                        </div>
+                    </paper-dialog-scrollable>
+                </paper-dialog>
+            </div>
+        </div>
+    </template>
+    <script>
+        Polymer({
+            is: 'build-projects-builds-overview',
+            properties: {
+                projectId: {
+                    type: String,
+                    observer: '_idChanged'
+                },
+                branch: {
+                    type: String,
+                    observer: '_branchChanged',
+                    default: 'master'
+                },
+                projectBranches: {
+                    type: Object,
+                    default: [{
+                        name: 'test'
+                    }]
+                },
+                host: {
+                    type: String
+                }
+            },
+            _onBack: function () {
+                window.history.pushState({}, '', '/projects/');
+                Polymer.Base.fire('location-changed', {}, {
+                    node: window
+                });
+            },
+            _computeProjectUrl: function (item) {
+                return `/projects/${item.project_id}/builds/`;
+            },
+            _showDependents: function () {
+                this.$.dependentProjectsDialog.open();
+            },
+            _hideDependents: function () {
+                this.$.dependentProjectsDialog.close();
+            },
+            unsubscribe: function () {
+                // Unsubscribe previous subscriptions.
+                this.subscriptions.forEach(function (subscription) {
+                    if (subscription) subscription.unsubscribe();
+                });
+            },
+            handleConfigResponse: function (data) {
+                var hostConfig = data.detail.response;
+                this.host = hostConfig.horizon_host;
+            },
+            _branchChanged: function (branch) {
+                if (!branch) {
+                    return
+                }
+                if (!this.subscriptions) {
+                    this.subscriptions = []
+                }
+                this.foundBuilds = false;
+                this.unsubscribe();
+                this.hideStages = true;
+                this.stages = [];
+                var i = this.subscriptions.length;
+                Build.on('ready', function (horizon) {
+                    this.subscriptions[i++] = horizon("builds").order('created_at', 'descending').findAll({
+                        project_id: this.projectId,
+                        branch: branch
+                    }).limit(10).watch().subscribe(function (builds) {
+                        if (builds.length > 0) {
+                            this.foundBuilds = true;
+                        }
+                        // Check for data
+                        this.latest_builds = builds;
+                        this.latest_builds_title = builds.length < 10 ? "Build history" :
+                            "Build history of latest 10 builds";
+                        this.highest_build_id = builds[0] && builds[0].id;
+                        if (!this.highest_build_id) {
+                            this.stages = [];
+                            return; // no highest build
+                        }
+                        this.build_name = "Latest build: " + this.highest_build_id +
+                            " in branch " + branch;
+                        this.build_status = builds[0].status;
+                        this.subscriptions[i++] = horizon("build_tasks").order('timestamp')
+                            .findAll({
+                                build_id: this.highest_build_id
+                            }).watch().subscribe(function (tasks) {
+                                if (tasks && tasks.length > 0) {
+                                    this.hideStages = false;
+                                }
+                                this.stages = tasks.reduce(this.toStages, []);
+                            }.bind(this));
+                    }.bind(this));
+                }.bind(this));
+            },
+            _idChanged: function (projectId) {
+                // Guard illegal input
+                if (!projectId) {
+                    return
+                }
+                if (!this.subscriptions) {
+                    this.subscriptions = []
+                }
+                this.foundBuilds = false;
+                this.unsubscribe();
+                this.hideStages = true;
+                this.hideNolio = true;
+                this.stages = [];
+                var i = this.subscriptions.length;
+                Build.on('ready', function (horizon) {
+                    this.subscriptions[i++] = horizon('projects').find({
+                        id: projectId
+                    }).watch().subscribe(function (project) {
+                        this.project = project;
+                    }.bind(this));
+                    this.subscriptions[i++] = this.subscribeForDependentProjects(horizon, projectId);
+                    this.$.branchDataReq.generateRequest();
+                    this.subscriptions[i++] = horizon("deployments").order('created_at',
+                        'descending').findAll({
+                        project_id: projectId,
+                    }).limit(3).watch().subscribe(function (deployments) {
+                        if (deployments && deployments.length > 0) {
+                            this.hideNolio = false;
+                        } else if (deployments.length === 0) {
+                            this.hideNolio = true;
+                        }
+                        this.deployments = deployments;
+                    }.bind(this));
+                    this.subscriptions[i++] = horizon("builds").order('created_at', 'descending').findAll({
+                        project_id: projectId,
+                        branch: this.branch
+                    }).limit(10).watch().subscribe(function (builds) {
+                        if (builds.length > 0) {
+                            this.foundBuilds = true;
+                        }
+                        // Check for data
+                        this.latest_builds = builds;
+                        this.latest_builds_title = builds.length < 10 ? "Build history" :
+                            "Build history of latest 10 builds";
+                        this.highest_build_id = builds[0] && builds[0].id;
+                        if (!this.highest_build_id) {
+                            this.stages = [];
+                            return; // no highest build
+                        }
+                        this.build_name = "Latest build: " + this.highest_build_id +
+                            " in branch " + builds[0].branch;
+                        this.build_status = builds[0].status;
+                        this.subscriptions[i++] = horizon("build_tasks").order('timestamp')
+                            .findAll({
+                                build_id: this.highest_build_id
+                            }).watch().subscribe(function (tasks) {
+                                if (tasks && tasks.length > 0) {
+                                    this.hideStages = false;
+                                }
+                                this.stages = tasks.reduce(this.toStages, []);
+                            }.bind(this));
+                        horizon.status(function (data) {
+                            if (data && data.type && data.type == 'disconnected') {
+                                this.project = {};
+                                this.stages = [];
+                                this.hideStages = true;
+                                this.foundBuilds = false;
+                                this.latest_builds = [];
+                                this.latest_builds_title = '';
+                                this.highest_build_id = '';
+                            }
+                        }.bind(this));
+                    }.bind(this));
+                }.bind(this));
+            },
+            /**
+             * @name subscribeForDependentProjects
+             * @description
+             * Query all the dependent packages builds
+             * @type {function}
+             * @param {object} horizon
+             * @param {string} projectId - package id to look for dependencies
+             * @returns {object} subscription
+             */
+            subscribeForDependentProjects: function (horizon, projectId) {
+                return horizon('builds')
+                    .order('updated_at', 'descending')
+                    .fetch()
+                    .subscribe(builds => {
+                        this.dependentProjects = builds
+                            .filter(({
+                                dependencies = {}
+                            }) => dependencies.hasOwnProperty(projectId))
+                            .map(({
+                                project_id,
+                                version,
+                                dependencies
+                            }) => {
+                                const projectVersion = dependencies[projectId].version;
+                                return {
+                                    project_id,
+                                    version,
+                                    projectVersion
+                                };
+                            })
+                            .filter((currentProject, index, projects) => (
+                                index === projects.findIndex(project => (
+                                    currentProject.project_id === project.project_id &&
+                                    currentProject.version === project.version &&
+                                    currentProject.projectVersion === project.projectVersion
+                                ))
+                            ));
+                        const dependentProjectsGroups = this.dependentProjects
+                            .reduce((memo, {
+                                project_id,
+                                version,
+                                projectVersion
+                            }) => {
+                                memo[projectVersion] = memo[projectVersion] || [];
+                                memo[projectVersion].push({
+                                    project_id,
+                                    version,
+                                    projectVersion
+                                });
+                                return memo;
+                            }, {});
+                        this.dependentProjectsGroups = Object.keys(dependentProjectsGroups)
+                            .map(project => dependentProjectsGroups[project]);
+                    });
+            },
+            handleBranchResponse: function (branches) {
+                this.projectBranches = branches.detail.response;
+            },
+            handleBranchError: function (error) {
+                console.log(error.detail);
+            },
+            detached: function () {
+                this.unsubscribe();
+            },
+            toStages: function (stages, task) {
+                // Filter only one stage by this task name
+                var stage = stages.filter(function (stage) {
+                    return stage.name == task.name
+                })[0];
+                if (!stage) {
+                    stage = {
+                        name: task.name
+                    }
+                    stages.push(stage);
+                }
+                stage.status = task.event;
+                if (task.result && typeof task.result === 'object') {
+                    if (typeof task.result.data === 'object') {
+                        stage.result = JSON.stringify(task.result.data, null, 4);
+                    } else {
+                        stage.result = task.result.data.toString();
+                    }
+                }
+                return stages;
+            }
+        });
+    </script>
+</dom-module>
